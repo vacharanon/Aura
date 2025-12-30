@@ -99,11 +99,13 @@ static lv_obj_t *img_hourly[7];
 static lv_obj_t *lbl_loc;
 static lv_obj_t *loc_ta;
 static lv_obj_t *results_dd;
-static lv_obj_t *btn_close_loc;
+static lv_obj_t *btn_save_loc;
 static lv_obj_t *btn_close_obj;
 static lv_obj_t *kb;
 static lv_obj_t *settings_win;
 static lv_obj_t *location_win = nullptr;
+static lv_obj_t *latitude_ta = nullptr;
+static lv_obj_t *longitude_ta = nullptr;
 static lv_obj_t *unit_switch;
 static lv_obj_t *clock_24hr_switch;
 static lv_obj_t *night_mode_switch;
@@ -252,16 +254,51 @@ static void ta_event_cb(lv_event_t *e) {
   lv_obj_t *kb = (lv_obj_t *)lv_event_get_user_data(e);
 
   // Show keyboard
+  lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_TEXT_LOWER);
   lv_keyboard_set_textarea(kb, ta);
   lv_obj_move_foreground(kb);
   lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);
 }
 
+static void ta_event_numeric_cb(lv_event_t *e) {
+  lv_obj_t *ta = (lv_obj_t *)lv_event_get_target(e);
+  lv_obj_t *kb = (lv_obj_t *)lv_event_get_user_data(e);
+  lv_event_code_t code = lv_event_get_code(e);
+
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED)
+  {
+    lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_NUMBER);
+    lv_keyboard_set_textarea(kb, ta);
+    lv_obj_move_foreground(kb);
+    lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(btn_save_loc, LV_OBJ_FLAG_HIDDEN);
+    if (location_win) {
+      lv_obj_set_height(location_win, LV_VER_RES - lv_obj_get_height(kb));
+      lv_obj_update_layout(location_win);   /*Be sure the sizes are recalculated*/
+    }
+    lv_obj_scroll_to_view_recursive(ta, LV_ANIM_OFF);
+  }
+  else if (code == LV_EVENT_DEFOCUSED || code == LV_EVENT_READY)
+  {
+    lv_keyboard_set_textarea(kb, NULL);
+    lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+
+    if (location_win) {
+      lv_obj_set_height(location_win, LV_VER_RES);
+      lv_obj_update_layout(location_win);   /*Be sure the sizes are recalculated*/
+      lv_obj_remove_flag(btn_save_loc, LV_OBJ_FLAG_HIDDEN);
+    }
+    // todo: scroll up so that the scroll bar is hidden
+    // lv_obj_scroll_to_view_recursive(ta, LV_ANIM_OFF);
+  }
+}
+
 static void kb_event_cb(lv_event_t *e) {
   lv_obj_t *kb = static_cast<lv_obj_t *>(lv_event_get_target(e));
   lv_obj_add_flag((lv_obj_t *)lv_event_get_target(e), LV_OBJ_FLAG_HIDDEN);
+  lv_obj_t *ta = lv_keyboard_get_textarea(kb);
 
-  if (lv_event_get_code(e) == LV_EVENT_READY) {
+  if (lv_event_get_code(e) == LV_EVENT_READY && ta == loc_ta) {
     const char *loc = lv_textarea_get_text(loc_ta);
     if (strlen(loc) > 0) {
       do_geocode_query(loc);
@@ -271,6 +308,23 @@ static void kb_event_cb(lv_event_t *e) {
 
 static void ta_defocus_cb(lv_event_t *e) {
   lv_obj_add_flag((lv_obj_t *)lv_event_get_user_data(e), LV_OBJ_FLAG_HIDDEN);
+}
+
+static void dd_value_changed_cb(lv_event_t *e) {
+  lv_obj_t *dd = (lv_obj_t *)lv_event_get_target(e);
+
+  JsonArray *pres = static_cast<JsonArray *>(lv_event_get_user_data(e));
+  uint16_t idx = lv_dropdown_get_selected(results_dd);
+
+  JsonObject obj = (*pres)[idx];
+  double lat = obj["latitude"].as<double>();
+  double lon = obj["longitude"].as<double>();
+
+  snprintf(latitude, sizeof(latitude), "%.6f", lat);
+  snprintf(longitude, sizeof(longitude), "%.6f", lon);
+
+  lv_textarea_set_text(latitude_ta, latitude);
+  lv_textarea_set_text(longitude_ta, longitude);
 }
 
 void touchscreen_read(lv_indev_t *indev, lv_indev_data_t *data) {
@@ -344,6 +398,7 @@ void setup() {
   use_24_hour = prefs.getBool("use24Hour", false);
   current_language = (Language)prefs.getUInt("language", LANG_EN);
   analogWrite(LCD_BACKLIGHT_PIN, brightness);
+  uint32_t night_brightness = prefs.getUInt("nightBrightness", 0);
 
   // Check for Wi-Fi config and request it if not available
   WiFiManager wm;
@@ -392,11 +447,55 @@ void wifi_splash_screen() {
   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
 
   const LocalizedStrings* strings = get_strings(current_language);
-  lv_obj_t *lbl = lv_label_create(scr);
-  lv_label_set_text(lbl, strings->wifi_config);
+  lv_obj_t * lbl;
+  lv_obj_t * obj;
+
+  // title
+  lbl = lv_label_create(scr);
+  lv_label_set_text(lbl, strings->wifi_config1);
+  lv_obj_set_style_text_font(lbl, get_font_14(), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_text_decor(lbl, LV_TEXT_DECOR_UNDERLINE, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 25);
+
+  // 2nd row
+  lbl = lv_label_create(scr);
+  lv_label_set_text(lbl, strings->wifi_config2);
   lv_obj_set_style_text_font(lbl, get_font_14(), LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_center(lbl);
+  lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 60);
+  // lv_obj_set_width(lbl, 163);
+
+  // 3rd row
+  lbl = lv_label_create(scr);
+  lv_label_set_text(lbl, strings->wifi_config3);
+  lv_obj_set_style_text_font(lbl, get_font_14(), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_align(lbl, LV_ALIGN_TOP_LEFT, 5, 165);
+  lv_obj_set_width(lbl, 163);
+
+  lv_obj_t * qr = lv_qrcode_create(scr);
+  lv_qrcode_set_size(qr, 60);
+  lv_qrcode_set_dark_color(qr, lv_color_black());
+  lv_qrcode_set_light_color(qr, lv_color_hex(0x4c8cb9));
+  // Set data
+  const char * apName = DEFAULT_CAPTIVE_SSID;
+  char data[29 + strlen(apName)];
+  strcat(data, "WIFI:T:nopass;S:");
+  strcat(data, DEFAULT_CAPTIVE_SSID);
+  strcat(data, ";P:;H:false;;");
+  lv_qrcode_update(qr, data, strlen(data));
+  lv_obj_set_style_border_color(qr, lv_color_hex(0x4c8cb9), 0);
+  lv_obj_set_style_border_width(qr, 1, 0);
+  lv_obj_align(qr, LV_ALIGN_TOP_RIGHT, -5, 150);
+
+  // 4th row
+  lbl = lv_label_create(scr);
+  lv_label_set_text(lbl, strings->wifi_config4);
+  lv_obj_set_style_text_font(lbl, get_font_14(), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, -20);
+
   lv_scr_load(scr);
 }
 
@@ -536,48 +635,61 @@ void populate_results_dropdown() {
   if (geoResults.size() > 0) {
     lv_dropdown_set_options_static(results_dd, dd_opts);
     lv_obj_add_flag(results_dd, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_bg_color(btn_close_loc, lv_palette_main(LV_PALETTE_GREEN), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_opa(btn_close_loc, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_color(btn_close_loc, lv_palette_darken(LV_PALETTE_GREEN, 1), LV_PART_MAIN | LV_STATE_PRESSED);
-    lv_obj_add_flag(btn_close_loc, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(btn_save_loc, lv_palette_main(LV_PALETTE_GREEN), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(btn_save_loc, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(btn_save_loc, lv_palette_darken(LV_PALETTE_GREEN, 1), LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_add_flag(btn_save_loc, LV_OBJ_FLAG_CLICKABLE);
   }
 }
 
 static void location_save_event_cb(lv_event_t *e) {
-  JsonArray *pres = static_cast<JsonArray *>(lv_event_get_user_data(e));
-  uint16_t idx = lv_dropdown_get_selected(results_dd);
+  strlcpy(latitude, lv_textarea_get_text(latitude_ta), sizeof(latitude));
+  strlcpy(longitude, lv_textarea_get_text(longitude_ta), sizeof(longitude));
 
-  JsonObject obj = (*pres)[idx];
-  double lat = obj["latitude"].as<double>();
-  double lon = obj["longitude"].as<double>();
-
-  snprintf(latitude, sizeof(latitude), "%.6f", lat);
-  snprintf(longitude, sizeof(longitude), "%.6f", lon);
   prefs.putString("latitude", latitude);
   prefs.putString("longitude", longitude);
 
-  String opts;
-  const char *name = obj["name"];
-  const char *admin = obj["admin1"];
-  const char *country = obj["country_code"];
-  opts += name;
-  if (admin) {
-    opts += ", ";
-    opts += admin;
-  }
+  JsonArray *pres = static_cast<JsonArray *>(lv_event_get_user_data(e));
+  if (pres) {
+    uint16_t idx = lv_dropdown_get_selected(results_dd);
 
-  prefs.putString("location", opts);
+    JsonObject obj = (*pres)[idx];
+  
+    String opts;
+    const char *name = obj["name"];
+    const char *admin = obj["admin1"];
+    const char *country = obj["country_code"];
+    opts += name;
+    if (admin) {
+      opts += ", ";
+      opts += admin;
+    }
+
+    prefs.putString("location", opts);
+    lv_label_set_text(lbl_loc, opts.c_str());
+  }
   location = prefs.getString("location");
 
   // Re‐fetch weather immediately
-  lv_label_set_text(lbl_loc, opts.c_str());
   fetch_and_update_weather();
+
+  lv_obj_del(latitude_ta);
+  latitude_ta = nullptr;
+
+  lv_obj_del(longitude_ta);
+  longitude_ta = nullptr;
 
   lv_obj_del(location_win);
   location_win = nullptr;
 }
 
 static void location_cancel_event_cb(lv_event_t *e) {
+  lv_obj_del(latitude_ta);
+  latitude_ta = nullptr;
+
+  lv_obj_del(longitude_ta);
+  longitude_ta = nullptr;
+
   lv_obj_del(location_win);
   location_win = nullptr;
 }
@@ -662,7 +774,7 @@ void create_location_dialog() {
   lv_obj_set_style_text_font(title, get_font_16(), 0);
   lv_obj_set_style_margin_left(title, 10, 0);
   lv_obj_set_size(location_win, 240, 320);
-  lv_obj_center(location_win);
+  lv_obj_align(location_win, LV_ALIGN_TOP_MID, 0, 0);
 
   lv_obj_t *cont = lv_win_get_content(location_win);
 
@@ -683,13 +795,14 @@ void create_location_dialog() {
   lv_obj_t *lbl2 = lv_label_create(cont);
   lv_label_set_text(lbl2, strings->search_results);
   lv_obj_set_style_text_font(lbl2, get_font_14(), LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_obj_align(lbl2, LV_ALIGN_TOP_LEFT, 5, 50);
+  lv_obj_align(lbl2, LV_ALIGN_TOP_LEFT, 5, 40);
 
   results_dd = lv_dropdown_create(cont);
   lv_obj_set_width(results_dd, 200);
-  lv_obj_align(results_dd, LV_ALIGN_TOP_LEFT, 5, 70);
+  lv_obj_align(results_dd, LV_ALIGN_TOP_LEFT, 5, 60);
   lv_obj_set_style_text_font(results_dd, get_font_14(), LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_set_style_text_font(results_dd, get_font_14(), LV_PART_SELECTED | LV_STATE_DEFAULT);
+  lv_obj_add_event_cb(results_dd, dd_value_changed_cb, LV_EVENT_VALUE_CHANGED, &geoResults);
 
   lv_obj_t *list = lv_dropdown_get_list(results_dd);
   lv_obj_set_style_text_font(list, get_font_14(), LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -697,24 +810,54 @@ void create_location_dialog() {
   lv_dropdown_set_options(results_dd, "");
   lv_obj_clear_flag(results_dd, LV_OBJ_FLAG_CLICKABLE);
 
-  btn_close_loc = lv_btn_create(cont);
-  lv_obj_set_size(btn_close_loc, 80, 40);
-  lv_obj_align(btn_close_loc, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+  lv_obj_t *lbl3 = lv_label_create(cont);
+  lv_label_set_text(lbl3, "Latitude");
+  lv_obj_set_style_text_font(lbl3, get_font_14(), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_align(lbl3, LV_ALIGN_TOP_LEFT, 5, 115);
 
-  lv_obj_add_event_cb(btn_close_loc, location_save_event_cb, LV_EVENT_CLICKED, &geoResults);
-  lv_obj_set_style_bg_color(btn_close_loc, lv_palette_main(LV_PALETTE_GREY), LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_obj_set_style_bg_opa(btn_close_loc, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_obj_set_style_bg_color(btn_close_loc, lv_palette_darken(LV_PALETTE_GREY, 1), LV_PART_MAIN | LV_STATE_PRESSED);
-  lv_obj_clear_flag(btn_close_loc, LV_OBJ_FLAG_CLICKABLE);
+  latitude_ta  = lv_textarea_create(cont);
+  lv_textarea_set_one_line(latitude_ta, true);
+  lv_obj_set_width(latitude_ta, 120);
+  lv_obj_align_to(latitude_ta, lbl3, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
+  lv_textarea_set_accepted_chars(latitude_ta, "01234567890.-");
+  lv_textarea_set_text(latitude_ta, latitude);
+  lv_obj_add_event_cb(latitude_ta, ta_event_numeric_cb, LV_EVENT_CLICKED, kb);
+  lv_obj_add_event_cb(latitude_ta, ta_event_numeric_cb, LV_EVENT_READY, kb);
+  lv_obj_add_event_cb(latitude_ta, ta_event_numeric_cb, LV_EVENT_DEFOCUSED, kb);
 
-  lv_obj_t *lbl_close = lv_label_create(btn_close_loc);
+  lv_obj_t *lbl4 = lv_label_create(cont);
+  lv_label_set_text(lbl4, "Longitude");
+  lv_obj_set_style_text_font(lbl4, get_font_14(), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_align(lbl4, LV_ALIGN_TOP_LEFT, 5, 160);
+
+  longitude_ta = lv_textarea_create(cont);
+  lv_textarea_set_one_line(longitude_ta, true);
+  lv_obj_set_width(longitude_ta, 120);
+  lv_obj_align_to(longitude_ta, lbl4, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
+  lv_textarea_set_accepted_chars(longitude_ta, "01234567890.-");
+  lv_textarea_set_text(longitude_ta, longitude);
+  lv_obj_add_event_cb(longitude_ta, ta_event_numeric_cb, LV_EVENT_CLICKED, kb);
+  lv_obj_add_event_cb(longitude_ta, ta_event_numeric_cb, LV_EVENT_READY, kb);
+  lv_obj_add_event_cb(longitude_ta, ta_event_numeric_cb, LV_EVENT_DEFOCUSED, kb);
+
+  btn_save_loc = lv_btn_create(cont);
+  lv_obj_set_size(btn_save_loc, 80, 40);
+  lv_obj_align(btn_save_loc, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+
+  lv_obj_add_event_cb(btn_save_loc, location_save_event_cb, LV_EVENT_CLICKED, &geoResults);
+  lv_obj_set_style_bg_color(btn_save_loc, lv_palette_main(LV_PALETTE_GREY), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_bg_opa(btn_save_loc, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_bg_color(btn_save_loc, lv_palette_darken(LV_PALETTE_GREY, 1), LV_PART_MAIN | LV_STATE_PRESSED);
+  lv_obj_clear_flag(btn_save_loc, LV_OBJ_FLAG_CLICKABLE);
+
+  lv_obj_t *lbl_close = lv_label_create(btn_save_loc);
   lv_label_set_text(lbl_close, strings->save);
   lv_obj_set_style_text_font(lbl_close, get_font_14(), LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_center(lbl_close);
 
   lv_obj_t *btn_cancel_loc = lv_btn_create(cont);
   lv_obj_set_size(btn_cancel_loc, 80, 40);
-  lv_obj_align_to(btn_cancel_loc, btn_close_loc, LV_ALIGN_OUT_LEFT_MID, -5, 0);
+  lv_obj_align_to(btn_cancel_loc, btn_save_loc, LV_ALIGN_OUT_LEFT_MID, -5, 0);
   lv_obj_add_event_cb(btn_cancel_loc, location_cancel_event_cb, LV_EVENT_CLICKED, &geoResults);
 
   lv_obj_t *lbl_cancel = lv_label_create(btn_cancel_loc);
@@ -777,11 +920,29 @@ void create_settings_window() {
   }
   lv_obj_add_event_cb(night_mode_switch, settings_event_handler, LV_EVENT_VALUE_CHANGED, NULL);
 
+  // Night mode brightness
+  lv_obj_t *lbl_nb = lv_label_create(cont);
+  lv_label_set_text(lbl_nb, strings->night_mode_brightness);
+  lv_obj_set_style_text_font(lbl_nb, get_font_12(), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_align_to(lbl_nb, lbl_night_mode, LV_ALIGN_OUT_BOTTOM_LEFT, 0, vertical_element_spacing);
+  lv_obj_t *n_slider = lv_slider_create(cont);
+  lv_slider_set_range(n_slider, 0, 127);
+  uint32_t saved_nb = prefs.getUInt("nightBrightness", 0);
+  lv_slider_set_value(n_slider, saved_nb, LV_ANIM_OFF);
+  lv_obj_set_width(n_slider, 100);
+  lv_obj_align_to(n_slider, lbl_nb, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
+
+  lv_obj_add_event_cb(n_slider, [](lv_event_t *e){
+    lv_obj_t *s = (lv_obj_t*)lv_event_get_target(e);
+    uint32_t v = lv_slider_get_value(s);
+    prefs.putUInt("nightBrightness", v);
+  }, LV_EVENT_VALUE_CHANGED, NULL);
+
   // 'Use F' switch
   lv_obj_t *lbl_u = lv_label_create(cont);
   lv_label_set_text(lbl_u, strings->use_fahrenheit);
   lv_obj_set_style_text_font(lbl_u, get_font_12(), LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_obj_align_to(lbl_u, lbl_night_mode, LV_ALIGN_OUT_BOTTOM_LEFT, 0, vertical_element_spacing);
+  lv_obj_align_to(lbl_u, lbl_nb, LV_ALIGN_OUT_BOTTOM_LEFT, 0, vertical_element_spacing);
 
   unit_switch = lv_switch_create(cont);
   lv_obj_align_to(unit_switch, lbl_u, LV_ALIGN_OUT_RIGHT_MID, 6, 0);
@@ -861,8 +1022,8 @@ void create_settings_window() {
   lv_obj_set_style_bg_color(btn_reset, lv_palette_darken(LV_PALETTE_RED, 1), LV_PART_MAIN | LV_STATE_PRESSED);
   lv_obj_set_style_text_color(btn_reset, lv_color_white(), LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_set_size(btn_reset, 100, 40);
-  lv_obj_align_to(btn_reset, btn_change_loc, LV_ALIGN_OUT_RIGHT_MID, 12, 0);
-
+  // lv_obj_align(btn_close_obj, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+  lv_obj_align_to(btn_reset, btn_change_loc, LV_ALIGN_OUT_BOTTOM_LEFT, 0, vertical_element_spacing);
   lv_obj_add_event_cb(btn_reset, reset_wifi_event_handler, LV_EVENT_CLICKED, nullptr);
 
   lv_obj_t *lbl_reset = lv_label_create(btn_reset);
@@ -873,10 +1034,10 @@ void create_settings_window() {
   // Close Settings button
   btn_close_obj = lv_btn_create(cont);
   lv_obj_set_size(btn_close_obj, 80, 40);
-  lv_obj_align(btn_close_obj, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+  lv_obj_align_to(btn_close_obj, btn_change_loc, LV_ALIGN_OUT_RIGHT_MID, 12, 0);
   lv_obj_add_event_cb(btn_close_obj, settings_event_handler, LV_EVENT_CLICKED, NULL);
 
-  // Cancel button
+  // Close button text
   lv_obj_t *lbl_btn = lv_label_create(btn_close_obj);
   lv_label_set_text(lbl_btn, strings->close);
   lv_obj_set_style_text_font(lbl_btn, get_font_12(), LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -949,7 +1110,7 @@ bool night_mode_should_be_active() {
 }
 
 void activate_night_mode() {
-  analogWrite(LCD_BACKLIGHT_PIN, 0);
+  analogWrite(LCD_BACKLIGHT_PIN, prefs.getUInt("nightBrightness", 0));
   night_mode_active = true;
 }
 

@@ -40,7 +40,7 @@ Install these EXACT library versions in Arduino IDE (Sketch -> Include Library -
 
 ### Project Setup
 1. Copy the `aura/` folder to `~/Documents/Arduino/aura/`
-2. Open `~/Documents/Arduino/aura/weather.ino` in Arduino IDE
+2. Open `~/Documents/Arduino/aura/aura.ino` in Arduino IDE
 3. Verify board and partition scheme settings
 4. Connect ESP32 hardware via USB
 

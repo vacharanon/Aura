@@ -30,11 +30,15 @@ struct LocalizedStrings {
   const char* city;
   const char* search_results;
   const char* city_placeholder;
-  const char* wifi_config;
+  const char* wifi_config1;
+  const char* wifi_config2;
+  const char* wifi_config3;
+  const char* wifi_config4;
   const char* reset_confirmation;
   const char* language_label;
   const char* weekdays[7];
   const char* use_night_mode;
+  const char* night_mode_brightness;
 };
 
 #define DEFAULT_CAPTIVE_SSID "Aura"
@@ -46,13 +50,14 @@ static const LocalizedStrings strings_en = {
   "Save", "Cancel", "Close", "Location", "Reset Wi-Fi",
   "Reset", "Change Location", "Aura Settings",
   "City:", "Search Results", "e.g. London",
-  "Wi-Fi Configuration:\n\n"
+  "Wi-Fi Configuration",
   "Please connect your\n"
   "phone or laptop to the\n"
   "temporary Wi-Fi access\n point "
   DEFAULT_CAPTIVE_SSID
   "\n"
-  "to configure.\n\n"
+  "to configure.",
+  "Or scan the QR.",
   "If you don't see a \n"
   "configuration screen \n"
   "after connecting,\n"
@@ -65,7 +70,8 @@ static const LocalizedStrings strings_en = {
   "reconfigure Wi-Fi credentials.",
   "Language:",
   {"Sun", "Mon", "Tues", "Wed", "Thurs", "Fri", "Sat"},
-  "Dim screen at night"
+  "Dim screen at night",
+  "Dim brighness"
 };
 
 static const LocalizedStrings strings_es = {
@@ -75,13 +81,14 @@ static const LocalizedStrings strings_es = {
   "Guardar", "Cancelar", "Cerrar", "Ubicación", "Wi-Fi",
   "Restablecer", "Cambiar Ubicación", "Configuración Aura",
   "Ciudad:", "Resultados de Búsqueda", "ej. Madrid",
-  "Configuración Wi-Fi:\n\n"
+  "Configuración Wi-Fi",
   "Conecte su teléfono\n"
   "o portátil al punto de\n"
   "acceso Wi-Fi temporal\n"
   DEFAULT_CAPTIVE_SSID
   "\n"
-  "para configurar.\n\n"
+  "para configurar.",
+  "Or scan the QR.",
   "Si no ve una pantalla\n"
   "de configuración después\n"
   "de conectarse, visite\n"
@@ -96,7 +103,8 @@ static const LocalizedStrings strings_es = {
   "credenciales Wi-Fi.",
   "Idioma:",
   {"Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"},
-  "Pantalla noche"
+  "Pantalla noche",
+  "Dim brighness"
 };
 
 static const LocalizedStrings strings_de = {
@@ -106,14 +114,15 @@ static const LocalizedStrings strings_de = {
   "Speichern", "Abbrechen", "Schließen", "Standort", "Wi-Fi",
   "Zurücksetzen", "Standort ändern", "Aura Einstellungen",
   "Stadt:", "Suchergebnisse", "z.B. Berlin",
-  "Wi-Fi Konfiguration:\n\n"
+  "Wi-Fi Konfiguration",
   "Verbinden Sie Ihr Telefon\n"
   "oder Laptop mit dem\n"
   "temporären Wi-Fi\n"
   "Zugangspunkt "
   DEFAULT_CAPTIVE_SSID
   "\n"
-  "zum Konfigurieren.\n\n"
+  "zum Konfigurieren.",
+  "Or scan the QR.",
   "Wenn Sie keinen\n"
   "Konfigurationsbildschirm\n"
   "sehen, besuchen Sie\n"
@@ -129,7 +138,8 @@ static const LocalizedStrings strings_de = {
   "neu zu konfigurieren.",
   "Sprache:",
   {"So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"},
-  "Nacht-Dimmen"
+  "Nacht-Dimmen",
+  "Dim brighness"
 };
 
 static const LocalizedStrings strings_fr = {
@@ -139,14 +149,15 @@ static const LocalizedStrings strings_fr = {
   "Sauvegarder", "Annuler", "Fermer", "Lieu", "Wi-Fi",
   "Réinitialiser", "Changer de lieu", "Paramètres Aura",
   "Ville:", "Résultats de recherche", "ex. Paris",
-  "Configuration Wi-Fi:\n\n"
+  "Configuration Wi-Fi",
   "Connectez votre téléphone\n"
   "ou ordinateur portable au\n"
   "point d'accès Wi-Fi\n"
   "temporaire "
   DEFAULT_CAPTIVE_SSID
   "\n"
-  "pour configurer.\n\n"
+  "pour configurer.",
+  "Or scan the QR.",
   "Si vous ne voyez pas\n"
   "d'écran de configuration\n"
   "après connexion, visitez\n"
@@ -162,7 +173,8 @@ static const LocalizedStrings strings_fr = {
   "les identifiants Wi-Fi.",
   "Langue:",
   {"Dim", "Lun", "Mar", "Mer", "Jeu", "Ven", "Sam"},
-  "Nuit écran"
+  "Nuit écran",
+  "Dim brighness"
 };
 
 static const LocalizedStrings strings_tr = {
@@ -172,14 +184,15 @@ static const LocalizedStrings strings_tr = {
   "Kaydet", "İptal", "Kapat", "Konum", "Wi-Fi Sifirla",
   "Sifirla", "Konumu Değiştir", "Aura Ayarlari",
   "Şehir:", "Arama Sonuçları", "örn. Londra",
-  "Wi-Fi Yapilandirmasi:\n\n"
+  "Wi-Fi Yapilandirmasi",
   "Lütfen telefonunuzu veya\n"
   "bilgisayarinizi geçici Wi-Fi\n"
   "erişim noktasina bağlayin "
   DEFAULT_CAPTIVE_SSID
   "\n"
-  "yapilandirmak için.\n\n"
+  "yapilandirmak için.",
   "Bağlandiktan sonra bir\n"
+  "Or scan the QR.",
   "yapilandirma ekrani görmezseniz,\n"
   "web tarayicinizda\n"
   "http://192.168.4.1 adresine gidin.",
@@ -192,7 +205,8 @@ static const LocalizedStrings strings_tr = {
   "gerekecek.",
   "Dil:",
   {"Paz", "Pzt", "Sal", "Çar", "Per", "Cum", "Cmt"},
-  "Gece kısık"
+  "Gece kısık",
+  "Dim brighness"
 };
 
 static const LocalizedStrings strings_sv = {
@@ -202,14 +216,15 @@ static const LocalizedStrings strings_sv = {
   "Spara", "Avbryt", "Stäng", "Plats", "Aterställ Wi-Fi",
   "Aterställ", "Andra plats", "Aura-inställningar",
   "Stad:", "Sökresultat", "t.ex. Stockholm",
-  "Wi-Fi-konfiguration:\n\n"
+  "Wi-Fi-konfiguration",
   "Anslut din telefon\n"
   "eller laptop till den\n"
   "tillfälliga Wi-Fi-\n"
   "atkomstpunkten "
   DEFAULT_CAPTIVE_SSID
   "\n"
-  "för att konfigurera.\n\n"
+  "för att konfigurera.",
+  "Or scan the QR.",
   "Om du inte ser en\n"
   "konfigurationsskärm\n"
   "efter anslutning, besök\n"
@@ -226,7 +241,8 @@ static const LocalizedStrings strings_sv = {
   "autentiseringsuppgifter.",
   "Sprak:",
   {"Sön", "Man", "Tis", "Ons", "Tor", "Fre", "Lör"},
-  "Nattdämpning"
+  "Nattdämpning",
+  "Dim brighness"
 };
 
 static const LocalizedStrings strings_it = {
@@ -236,13 +252,14 @@ static const LocalizedStrings strings_it = {
   "Salva", "Cancellare", "Close", "Posizione", "Resetta Wi-Fi",
   "Reset", "Cambia posizione", "Impostazioni aura",
   "Città:", "Risultati di ricerca", "e.s. Londra",
-  "Configurazione Wi-Fi:\n\n"
+  "Configurazione Wi-Fi",
   "Per favore collega il tuo\n"
   "smartphone o laptop\n"
   "al Wi-Fi temporaneo\n "
   DEFAULT_CAPTIVE_SSID
   "\n"
-  "per configurare la rete.\n\n"
+  "per configurare la rete.",
+  "Or scan the QR.",
   "Se non vedi la \n"
   "Schermata di configurazione \n"
   "dopo il collegamento,\n"
@@ -255,7 +272,8 @@ static const LocalizedStrings strings_it = {
   "riconfigurare le credenziali Wi-Fi.",
   "Lingua:",
   {"Dom", "Lun", "Mar", "Mer", "Gio", "Ven", "Sab"},
-  "Schermo notte"
+  "Schermo notte",
+  "Dim brighness"
 };
 
 static const LocalizedStrings* get_strings(Language current_language) {

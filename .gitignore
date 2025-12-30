@@ -1,3 +1,7 @@
 .venv
 .idea
 .DS_Store
+.vscode/arduino.json
+.vscode/c_cpp_properties.json
+aura/.vscode/arduino.json
+aura/.vscode/c_cpp_properties.json
