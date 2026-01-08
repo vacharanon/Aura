@@ -1,14 +1,17 @@
+
 #include <Arduino.h>
 #include <WiFiManager.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <time.h>
+#include <stdlib.h>
 #include <lvgl.h>
 #include <TFT_eSPI.h>
 #include <XPT2046_Touchscreen.h>
 #include <Preferences.h>
 #include "esp_system.h"
 #include "translations.h"
+#include "secrets.h"
 
 #define XPT2046_IRQ 36   // T_IRQ
 #define XPT2046_MOSI 32  // T_DIN
@@ -25,6 +28,7 @@
 #define LOCATION_DEFAULT "London"
 #define DEFAULT_CAPTIVE_SSID "Aura"
 #define UPDATE_INTERVAL 600000UL  // 10 minutes
+#define SCREEN_INTERVAL 30000UL  // 10 seconds
 
 // Night mode starts at 10pm and ends at 6am
 #define NIGHT_MODE_START_HOUR 22
@@ -80,8 +84,15 @@ static JsonArray geoResults;
 static bool night_mode_active = false;
 static bool temp_screen_wakeup_active = false;
 static lv_timer_t *temp_screen_wakeup_timer = nullptr;
+// Track whether we've fetched air-quality data at least once
+static bool air_quality_initialized = false;
+
+// Screen switching variables
+static bool show_weather_screen = true;
+static lv_timer_t *screen_switch_timer = nullptr;
 
 // UI components
+static lv_obj_t *panel_weather;
 static lv_obj_t *lbl_today_temp;
 static lv_obj_t *lbl_today_feels_like;
 static lv_obj_t *img_today_icon;
@@ -111,6 +122,13 @@ static lv_obj_t *clock_24hr_switch;
 static lv_obj_t *night_mode_switch;
 static lv_obj_t *language_dropdown;
 static lv_obj_t *lbl_clock;
+static lv_obj_t *panel_air_quality;
+static lv_obj_t *lbl_aqi_value;
+static lv_obj_t *lbl_aqi_category;
+// static lv_obj_t *img_aqi_icon;
+static lv_obj_t *box_air_quality_hourly;
+static lv_obj_t *lbl_air_quality_hourly[7];
+static lv_obj_t *lbl_air_quality_hourly_aqi[7];
 
 // Weather icons
 LV_IMG_DECLARE(icon_blizzard);
@@ -170,11 +188,17 @@ LV_IMG_DECLARE(image_wintry_mix_rain_snow);
 
 void create_ui();
 void fetch_and_update_weather();
+void fetch_and_update_air_quality();
+void fetch_and_update_air_quality_forecast();
+void fetch_every_data_sources();
 void create_settings_window();
 static void screen_event_cb(lv_event_t *e);
 static void settings_event_handler(lv_event_t *e);
 const lv_img_dsc_t *choose_image(int wmo_code, int is_day);
 const lv_img_dsc_t *choose_icon(int wmo_code, int is_day);
+String get_iso8601_time_plus_hours(int hours);
+int httpGetWithRetries(HTTPClient &http, const String &url, int maxAttempts, int backoffMs);
+int httpPostWithRetries(HTTPClient &http, const String &url, const String &payload, int maxAttempts, int backoffMs);
 
 // Screen dimming functions
 bool night_mode_should_be_active();
@@ -182,6 +206,9 @@ void activate_night_mode();
 void deactivate_night_mode();
 void check_for_night_mode();
 void handle_temp_screen_wakeup_timeout(lv_timer_t *timer);
+void screen_switch_timer_callback(lv_timer_t *timer);
+void switch_screen(bool show_weather);
+void ensure_air_quality_initialized();
 
 
 int day_of_week(int y, int m, int d) {
@@ -244,7 +271,7 @@ static void update_clock(lv_timer_t *timer) {
     int hour = timeinfo.tm_hour % 12;
     if(hour == 0) hour = 12;
     const char *ampm = (timeinfo.tm_hour < 12) ? strings->am : strings->pm;
-    snprintf(buf, sizeof(buf), "%d:%02d%s", hour, timeinfo.tm_min, ampm);
+    snprintf(buf, sizeof(buf), "%d:%02d %s", hour, timeinfo.tm_min, ampm);
   }
   lv_label_set_text(lbl_clock, buf);
 }
@@ -406,10 +433,19 @@ void setup() {
   wm.autoConnect(DEFAULT_CAPTIVE_SSID);
 
   lv_timer_create(update_clock, 1000, NULL);
+  screen_switch_timer = lv_timer_create(screen_switch_timer_callback, SCREEN_INTERVAL, NULL);
 
-  lv_obj_clean(lv_scr_act());
+  clear_ui();
   create_ui();
   fetch_and_update_weather();
+  // fetch_and_update_air_quality();
+  // fetch_and_update_air_quality_forecast();
+}
+
+void fetch_every_data_sources() {
+  fetch_and_update_weather();
+  fetch_and_update_air_quality();
+  fetch_and_update_air_quality_forecast();
 }
 
 void flush_wifi_splashscreen(uint32_t ms = 200) {
@@ -430,7 +466,7 @@ void loop() {
   static uint32_t last = millis();
 
   if (millis() - last >= UPDATE_INTERVAL) {
-    fetch_and_update_weather();
+    fetch_every_data_sources();
     last = millis();
   }
 
@@ -499,17 +535,53 @@ void wifi_splash_screen() {
   lv_scr_load(scr);
 }
 
+void clear_ui() {
+  lv_obj_clean(lv_scr_act());
+}
+
 void create_ui() {
   lv_obj_t *scr = lv_scr_act();
-  lv_obj_set_style_bg_color(scr, lv_color_hex(0x4c8cb9), LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_obj_set_style_bg_grad_color(scr, lv_color_hex(0xa6cdec), LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_obj_set_style_bg_grad_dir(scr, LV_GRAD_DIR_VER, LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
 
+  create_weather_ui();
+  create_air_quality_ui();
+
+  // Create clock label in the top-right corner
+  lbl_clock = lv_label_create(scr);
+  lv_obj_set_style_text_font(lbl_clock, get_font_14(), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_text_color(lbl_clock, lv_color_hex(0xb9ecff), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_label_set_text(lbl_clock, "");
+  lv_obj_align(lbl_clock, LV_ALIGN_TOP_RIGHT, -10, 2);
+}
+
+void create_weather_ui() {
+  lv_obj_t *scr = lv_scr_act();
+  
+  panel_weather = lv_obj_create(scr);
+  lv_obj_remove_style_all(panel_weather);
+  lv_obj_set_style_border_side(panel_weather, LV_BORDER_SIDE_NONE, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_radius(panel_weather, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+  // lv_obj_remove_flag(panel_weather, LV_OBJ_FLAG_SCROLLABLE);
+  // lv_obj_set_size(panel_weather, LV_HOR_RES, lv_pct(100));
+  lv_obj_set_size(panel_weather, LV_HOR_RES, LV_VER_RES);
+  lv_obj_set_pos(panel_weather, 0, 0);
+
+  lv_obj_set_style_bg_color(panel_weather, lv_color_hex(0x4c8cb9), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_bg_grad_color(panel_weather, lv_color_hex(0xa6cdec), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_bg_grad_dir(panel_weather, LV_GRAD_DIR_VER, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_bg_opa(panel_weather, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+  // Clear all events
+  uint32_t i;
+  uint32_t event_cnt = lv_obj_get_event_count(panel_weather);
+  for(i = 0; i < event_cnt; i++) {
+      lv_obj_remove_event(panel_weather, i);
+  }
+  // Change view mode on tap
+  lv_obj_add_event_cb(panel_weather, screen_click_event_cb, LV_EVENT_CLICKED, panel_weather);
   // Trigger settings screen on touch
-  lv_obj_add_event_cb(scr, screen_event_cb, LV_EVENT_CLICKED, NULL);
-
-  img_today_icon = lv_img_create(scr);
+  lv_obj_add_event_cb(panel_weather, screen_long_press_event_cb, LV_EVENT_LONG_PRESSED, NULL);
+  
+  img_today_icon = lv_img_create(panel_weather);
   lv_img_set_src(img_today_icon, &image_partly_cloudy);
   lv_obj_align(img_today_icon, LV_ALIGN_TOP_MID, -64, 4);
 
@@ -520,25 +592,25 @@ void create_ui() {
 
   const LocalizedStrings* strings = get_strings(current_language);
 
-  lbl_today_temp = lv_label_create(scr);
+  lbl_today_temp = lv_label_create(panel_weather);
   lv_label_set_text(lbl_today_temp, strings->temp_placeholder);
   lv_obj_set_style_text_font(lbl_today_temp, get_font_42(), LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_align(lbl_today_temp, LV_ALIGN_TOP_MID, 45, 25);
   lv_obj_add_style(lbl_today_temp, &default_label_style, LV_PART_MAIN | LV_STATE_DEFAULT);
 
-  lbl_today_feels_like = lv_label_create(scr);
+  lbl_today_feels_like = lv_label_create(panel_weather);
   lv_label_set_text(lbl_today_feels_like, strings->feels_like_temp);
   lv_obj_set_style_text_font(lbl_today_feels_like, get_font_14(), LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_set_style_text_color(lbl_today_feels_like, lv_color_hex(0xe4ffff), LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_align(lbl_today_feels_like, LV_ALIGN_TOP_MID, 45, 75);
 
-  lbl_forecast = lv_label_create(scr);
+  lbl_forecast = lv_label_create(panel_weather);
   lv_label_set_text(lbl_forecast, strings->seven_day_forecast);
   lv_obj_set_style_text_font(lbl_forecast, get_font_12(), LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_set_style_text_color(lbl_forecast, lv_color_hex(0xe4ffff), LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_align(lbl_forecast, LV_ALIGN_TOP_LEFT, 20, 110);
 
-  box_daily = lv_obj_create(scr);
+  box_daily = lv_obj_create(panel_weather);
   lv_obj_set_size(box_daily, 220, 180);
   lv_obj_align(box_daily, LV_ALIGN_TOP_LEFT, 10, 135);
   lv_obj_set_style_bg_color(box_daily, lv_color_hex(0x5e9bc8), LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -574,7 +646,7 @@ void create_ui() {
     lv_obj_align(img_daily[i], LV_ALIGN_TOP_LEFT, 72, i * 24);
   }
 
-  box_hourly = lv_obj_create(scr);
+  box_hourly = lv_obj_create(panel_weather);
   lv_obj_set_size(box_hourly, 220, 180);
   lv_obj_align(box_hourly, LV_ALIGN_TOP_LEFT, 10, 135);
   lv_obj_set_style_bg_color(box_hourly, lv_color_hex(0x5e9bc8), LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -611,13 +683,92 @@ void create_ui() {
   }
 
   lv_obj_add_flag(box_hourly, LV_OBJ_FLAG_HIDDEN);
+}
 
-  // Create clock label in the top-right corner
-  lbl_clock = lv_label_create(scr);
-  lv_obj_set_style_text_font(lbl_clock, get_font_14(), LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_obj_set_style_text_color(lbl_clock, lv_color_hex(0xb9ecff), LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_label_set_text(lbl_clock, "");
-  lv_obj_align(lbl_clock, LV_ALIGN_TOP_RIGHT, -10, 2);
+void create_air_quality_ui() {
+  lv_obj_t *scr = lv_scr_act();
+    
+  panel_air_quality = lv_obj_create(scr);
+  lv_obj_remove_style_all(panel_air_quality);
+  lv_obj_set_style_border_side(panel_air_quality, LV_BORDER_SIDE_NONE, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_radius(panel_air_quality, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+  // lv_obj_remove_flag(panel_air_quality, LV_OBJ_FLAG_SCROLLABLE);
+  // lv_obj_set_size(panel_air_quality, LV_HOR_RES, lv_pct(100));
+  lv_obj_set_size(panel_air_quality, LV_HOR_RES, LV_VER_RES);
+  lv_obj_set_pos(panel_air_quality, 0, 0);
+
+  lv_obj_set_style_bg_color(panel_air_quality, lv_color_hex(0x4c8cb9), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_bg_grad_color(panel_air_quality, lv_color_hex(0xa6cdec), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_bg_grad_dir(panel_air_quality, LV_GRAD_DIR_VER, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_bg_opa(panel_air_quality, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+  // Clear all events
+  uint32_t i;
+  uint32_t event_cnt = lv_obj_get_event_count(panel_air_quality);
+  for(i = 0; i < event_cnt; i++) {
+      lv_obj_remove_event(panel_air_quality, i);
+  }
+  // Change view mode on tap
+  lv_obj_add_event_cb(panel_air_quality, screen_click_event_cb, LV_EVENT_CLICKED, panel_air_quality);
+  // Trigger settings screen on touch
+  lv_obj_add_event_cb(panel_air_quality, screen_long_press_event_cb, LV_EVENT_LONG_PRESSED, NULL);
+
+  // HIDE initially
+  lv_obj_add_flag(panel_air_quality, LV_OBJ_FLAG_HIDDEN);
+
+  static lv_style_t default_label_style;
+  lv_style_init(&default_label_style);
+  lv_style_set_text_color(&default_label_style, lv_color_white());
+  lv_style_set_text_opa(&default_label_style, LV_OPA_COVER);
+
+  lbl_aqi_value = lv_label_create(panel_air_quality);
+  lv_label_set_text(lbl_aqi_value, "N/A");
+  lv_obj_set_style_text_font(lbl_aqi_value, get_font_42(), LV_PART_MAIN | LV_STATE_DEFAULT);
+  // lv_obj_set_width(lbl_aqi_value, 110);
+  lv_obj_set_width(lbl_aqi_value, 120);
+  lv_obj_set_style_text_align(lbl_aqi_value, LV_TEXT_ALIGN_CENTER, 0);
+  // lv_obj_align(lbl_aqi_value, LV_ALIGN_TOP_RIGHT, 5, 5);
+  // lv_obj_align(lbl_aqi_value, LV_ALIGN_TOP_MID, 45, 25);
+  lv_obj_align(lbl_aqi_value, LV_ALIGN_TOP_MID, 0, 25);
+  lv_obj_add_style(lbl_aqi_value, &default_label_style, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+  lbl_aqi_category = lv_label_create(panel_air_quality);
+  lv_label_set_text(lbl_aqi_category, "No data");
+  // lv_obj_set_width(lbl_aqi_category, 110);
+  lv_obj_set_width(lbl_aqi_category, 120);
+  lv_obj_set_style_text_font(lbl_aqi_category, get_font_20(), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_text_color(lbl_aqi_category, lv_color_hex(0xe4ffff), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_text_align(lbl_aqi_category, LV_TEXT_ALIGN_CENTER, 0);
+  // lv_obj_align(lbl_aqi_category, LV_ALIGN_TOP_MID, 45, 75);
+  lv_obj_align(lbl_aqi_category, LV_ALIGN_TOP_MID, 0, 75);
+  // lv_obj_align(lbl_aqi_category, LV_ALIGN_TOP_LEFT, 5, 37);
+
+  box_air_quality_hourly = lv_obj_create(panel_air_quality);
+  lv_obj_set_size(box_air_quality_hourly, 220, 180);
+  lv_obj_align(box_air_quality_hourly, LV_ALIGN_TOP_LEFT, 10, 135);
+  lv_obj_set_style_bg_color(box_air_quality_hourly, lv_color_hex(0x5e9bc8), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_bg_opa(box_air_quality_hourly, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_radius(box_air_quality_hourly, 4, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_border_width(box_air_quality_hourly, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_clear_flag(box_air_quality_hourly, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_scrollbar_mode(box_air_quality_hourly, LV_SCROLLBAR_MODE_OFF);
+  lv_obj_set_style_pad_all(box_air_quality_hourly, 10, LV_PART_MAIN);
+  lv_obj_set_style_pad_gap(box_air_quality_hourly, 0, LV_PART_MAIN);
+  lv_obj_add_event_cb(box_air_quality_hourly, hourly_cb, LV_EVENT_CLICKED, NULL);
+
+  
+  for (int i = 0; i < 7; i++) {
+    lbl_air_quality_hourly[i] = lv_label_create(box_air_quality_hourly);
+    lbl_air_quality_hourly_aqi[i] = lv_label_create(box_air_quality_hourly);
+
+    lv_obj_add_style(lbl_air_quality_hourly[i], &default_label_style, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(lbl_air_quality_hourly[i], get_font_16(), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_align(lbl_air_quality_hourly[i], LV_ALIGN_TOP_LEFT, 2, i * 24);
+
+    lv_obj_add_style(lbl_air_quality_hourly_aqi[i], &default_label_style, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(lbl_air_quality_hourly_aqi[i], get_font_16(), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_align(lbl_air_quality_hourly_aqi[i], LV_ALIGN_TOP_RIGHT, 0, i * 24);
+  }
 }
 
 void populate_results_dropdown() {
@@ -671,7 +822,7 @@ static void location_save_event_cb(lv_event_t *e) {
   location = prefs.getString("location");
 
   // Re‐fetch weather immediately
-  fetch_and_update_weather();
+  fetch_every_data_sources();
 
   lv_obj_del(latitude_ta);
   latitude_ta = nullptr;
@@ -694,7 +845,25 @@ static void location_cancel_event_cb(lv_event_t *e) {
   location_win = nullptr;
 }
 
-void screen_event_cb(lv_event_t *e) {
+
+void screen_click_event_cb(lv_event_t *e) {
+  lv_obj_t *caller = (lv_obj_t *)lv_event_get_user_data(e);
+  if (caller == panel_weather) {
+    ensure_air_quality_initialized();
+    switch_screen(false);
+    show_weather_screen = false;
+  } else {
+    switch_screen(true);
+    show_weather_screen = true;
+  }
+  
+  // Reset the timer when manually switching screens
+  if (screen_switch_timer) {
+    lv_timer_reset(screen_switch_timer);
+  }
+}
+
+void screen_long_press_event_cb(lv_event_t *e) {
   create_settings_window();
 }
 
@@ -1076,9 +1245,9 @@ static void settings_event_handler(lv_event_t *e) {
     lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
     
     // Recreate the main UI with the new language
-    lv_obj_clean(lv_scr_act());
+    clear_ui();
     create_ui();
-    fetch_and_update_weather();
+    fetch_every_data_sources();
     return;
   }
 
@@ -1094,7 +1263,7 @@ static void settings_event_handler(lv_event_t *e) {
     lv_obj_del(settings_win);
     settings_win = nullptr;
 
-    fetch_and_update_weather();
+    fetch_every_data_sources();
   }
 }
 
@@ -1117,6 +1286,24 @@ void activate_night_mode() {
 void deactivate_night_mode() {
   analogWrite(LCD_BACKLIGHT_PIN, prefs.getUInt("brightness", 128));
   night_mode_active = false;
+}
+
+void switch_screen(bool show_weather) {
+  if (show_weather) {
+    lv_obj_clear_flag(panel_weather, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(panel_air_quality, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(panel_weather, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(panel_air_quality, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
+void ensure_air_quality_initialized() {
+  if (!air_quality_initialized) {
+    air_quality_initialized = true;
+    fetch_and_update_air_quality();
+    fetch_and_update_air_quality_forecast();
+  }
 }
 
 void check_for_night_mode() {
@@ -1144,13 +1331,20 @@ void handle_temp_screen_wakeup_timeout(lv_timer_t *timer) {
   }
 }
 
+void screen_switch_timer_callback(lv_timer_t *timer) {
+  ensure_air_quality_initialized();
+  
+  show_weather_screen = !show_weather_screen;
+  switch_screen(show_weather_screen);
+}
+
 void do_geocode_query(const char *q) {
   geoDoc.clear();
   String url = String("https://geocoding-api.open-meteo.com/v1/search?name=") + urlencode(q) + "&count=15";
 
   HTTPClient http;
-  http.begin(url);
-  if (http.GET() == HTTP_CODE_OK) {
+  int code = httpGetWithRetries(http, url, 3, 1000);
+  if (code == HTTP_CODE_OK) {
     Serial.println("Completed location search at open-meteo: " + url);
     auto err = deserializeJson(geoDoc, http.getString());
     if (!err) {
@@ -1160,12 +1354,11 @@ void do_geocode_query(const char *q) {
         Serial.println("Failed to parse search response from open-meteo: " + url);
     }
   } else {
-      Serial.println("Failed location search at open-meteo: " + url);
+      Serial.println("Failed location search at open-meteo: " + url + " code=" + String(code));
   }
   http.end();
 }
-
-void fetch_and_update_weather() {
+void check_wifi_connection() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi no longer connected. Attempting to reconnect...");
     WiFi.disconnect();
@@ -1178,7 +1371,10 @@ void fetch_and_update_weather() {
     }
     Serial.println("WiFi connection reestablished.");
   }
+}
 
+void fetch_and_update_weather() {
+  check_wifi_connection();
 
   String url = String("http://api.open-meteo.com/v1/forecast?latitude=")
                + latitude + "&longitude=" + longitude
@@ -1189,9 +1385,9 @@ void fetch_and_update_weather() {
                + "&timezone=auto";
 
   HTTPClient http;
-  http.begin(url);
+  int code = httpGetWithRetries(http, url, 3, 1000);
 
-  if (http.GET() == HTTP_CODE_OK) {
+  if (code == HTTP_CODE_OK) {
     Serial.println("Updated weather from open-meteo: " + url);
 
     String payload = http.getString();
@@ -1279,6 +1475,383 @@ void fetch_and_update_weather() {
     }
   } else {
     Serial.println("HTTP GET failed at " + url);
+  }
+  http.end();
+}
+
+void fetch_and_update_air_quality() {
+  check_wifi_connection();
+
+//https://airquality.googleapis.com/v1/currentConditions:lookup?key=AIzaSyBm1I17Gsr1D28b_B1qFm6GjdimxumpaEA
+
+  String url = String("https://airquality.googleapis.com/v1/currentConditions:lookup");
+
+  HTTPClient http;
+  String fullUrl = url + "?key=" + GOOGLE_MAP_API_KET;
+  int code = -1;
+  String jsonPayload = String("")
+            + "{"
+            + " \"location\":{"
+            + "    \"latitude\":\"" + latitude + "\"," 
+            + "    \"longitude\":\"" + longitude + "\""
+            + "  },"
+            + " \"uaqiColorPalette\": \"RED_GREEN\","
+            + " \"universalAqi\": \"true\","
+            + " \"languageCode\": \"en\""
+            + "}";
+
+  code = httpPostWithRetries(http, fullUrl, jsonPayload, 3, 1000);
+  if (code == HTTP_CODE_OK) {
+    Serial.println("Updated Air Quality: " + url);
+
+    String payload = http.getString();
+    DynamicJsonDocument doc(32 * 1024);
+
+    // Serial.println(payload);
+
+    if (deserializeJson(doc, payload) == DeserializationError::Ok) {
+      // example response:
+/*
+{
+"dateTime": "2025-12-30T08:00:00Z",
+"regionCode": "th",
+"indexes": [
+{
+"code": "uaqi",
+"displayName": "Universal AQI",
+"aqi": 43,
+"aqiDisplay": "43",
+"color": {
+"red": 1,
+"green": 0.8392157
+},
+"category": "Moderate air quality",
+"dominantPollutant": "o3"
+}
+]
+}
+*/
+
+      JsonArray indexes = doc["indexes"].as<JsonArray>();
+      if (indexes.size() > 0) {
+        JsonObject index0 = indexes[0];
+        int aqi = index0["aqi"].as<int>();
+        String aqiDisplay = index0["aqiDisplay"].as<String>();
+        const char* category = index0["category"];
+        lv_label_set_text_fmt(lbl_aqi_value, "%s", aqiDisplay.c_str());
+        lv_label_set_text(lbl_aqi_category, category);
+        float red = index0["color"]["red"].as<float>();
+        float green = index0["color"]["green"].as<float>();
+        float blue = index0["color"]["blue"].as<float>();
+        // float alpha = index0["color"]["alpha"].as<float>();
+
+        if (isnan(red)) {
+          red = 0.0;
+        }
+        if (isnan(green)) {
+          green = 0.0;
+        }
+        if (isnan(blue)) {
+          blue = 0.0;
+        }
+        // if (isnan(alpha)) {
+          // alpha = 1.0;
+        // }
+        lv_color_t c = lv_color_make((uint8_t)(red * 255), (uint8_t)(green * 255), (uint8_t)(blue * 255));
+        lv_obj_set_style_text_color(lbl_aqi_value, c, LV_PART_MAIN | LV_STATE_DEFAULT);
+        // lv_obj_set_style_bg_color(panel_air_quality, c, LV_PART_MAIN | LV_STATE_DEFAULT);
+        // lv_obj_set_style_bg_grad_color(panel_air_quality, lv_color_lighten(c, 50), LV_PART_MAIN | LV_STATE_DEFAULT);
+      } else {
+        lv_label_set_text(lbl_aqi_value, "N/A");
+        lv_label_set_text(lbl_aqi_category, "No data");
+        lv_obj_set_style_text_color(lbl_aqi_value, lv_color_white(), LV_PART_MAIN | LV_STATE_DEFAULT);
+        // lv_obj_set_style_bg_color(panel_air_quality, lv_color_hex(0x4c8cb9), LV_PART_MAIN | LV_STATE_DEFAULT);
+        // lv_obj_set_style_bg_grad_color(panel_air_quality, lv_color_hex(0xa6cdec), LV_PART_MAIN | LV_STATE_DEFAULT);
+      }
+    } else {
+      Serial.println("JSON parse failed on result from " + url);
+    }
+  } else {
+    Serial.println("HTTP POST failed at " + url + " code=" + String(code));
+    if (http.connected()) {
+      String payload = http.getString();
+      Serial.println(payload);
+    }
+  }
+  http.end();
+}
+
+void fetch_and_update_air_quality_forecast() {
+  check_wifi_connection();
+
+  String url = String("https://airquality.googleapis.com/v1/forecast:lookup");
+
+  HTTPClient http;
+  
+  String startTime = get_iso8601_time_plus_hours(1);
+  String endTime = get_iso8601_time_plus_hours(8);
+  String jsonPayload = String("")
+            + "{"
+            + " \"location\":{"
+            + "    \"latitude\":\"" + latitude + "\","
+            + "    \"longitude\":\"" + longitude + "\""
+            + "  },"
+            + " \"uaqiColorPalette\": \"RED_GREEN\","
+            + " \"pageSize\": \"7\","
+            + " \"universalAqi\": \"true\","
+            + " \"languageCode\": \"en\","
+            + " \"period\":{"
+            + "    \"startTime\":\"" + startTime + "\","
+            + "    \"endTime\":\"" + endTime + "\""
+            + "  }"
+            + "}";
+
+  int code = httpPostWithRetries(http, url + "?key=" + GOOGLE_MAP_API_KET, jsonPayload, 3, 1000);
+  if (code == HTTP_CODE_OK) {
+    Serial.println("Updated Air Quality Forcast: " + url);
+
+    String payload = http.getString();
+    DynamicJsonDocument doc(32 * 1024);
+
+    Serial.println(payload);
+
+    if (deserializeJson(doc, payload) == DeserializationError::Ok) {
+    const LocalizedStrings* strings = get_strings(current_language);
+/* //Example response
+{
+00:56:45.327 ->   "hourlyForecasts": [
+16:56:42.008 ->    {
+16:56:42.008 ->       "dateTime": "2026-01-06T10:00:00Z",
+16:56:42.008 ->       "indexes": [
+16:56:42.040 ->         {
+16:56:42.040 ->           "code": "uaqi",
+16:56:42.040 ->           "displayName": "Universal AQI",
+16:56:42.040 ->           "aqi": 47,
+16:56:42.040 ->           "aqiDisplay": "47",
+16:56:42.040 ->           "color": {
+16:56:42.040 ->             "red": 1,
+16:56:42.040 ->             "green": 0.92941177
+16:56:42.040 ->           },
+16:56:42.040 ->           "category": "Moderate air quality",
+16:56:42.040 ->           "dominantPollutant": "o3"
+16:56:42.040 ->         }
+16:56:42.040 ->       ]
+16:56:42.040 ->     },
+16:56:42.136 ->     {
+16:56:42.136 ->       "dateTime": "2026-01-06T13:00:00Z",
+16:56:42.136 ->       "indexes": [
+16:56:42.136 ->         {
+16:56:42.136 ->           "code": "uaqi",
+16:56:42.136 ->           "displayName": "Universal AQI",
+16:56:42.136 ->           "aqi": 66,
+16:56:42.136 ->           "aqiDisplay": "66",
+16:56:42.136 ->           "color": {
+16:56:42.136 ->             "red": 0.6117647,
+16:56:42.136 ->             "green": 0.84705883,
+16:56:42.136 ->             "blue": 0.15686275
+16:56:42.168 ->           },
+16:56:42.168 ->           "category": "Good air quality",
+16:56:42.168 ->           "dominantPollutant": "o3"
+16:56:42.168 ->         }
+16:56:42.168 ->       ]
+16:56:42.168 ->     },
+16:56:42.168 ->     {
+16:56:42.168 ->       "dateTime": "2026-01-06T14:00:00Z",
+16:56:42.168 ->       "indexes": [
+16:56:42.168 ->         {
+16:56:42.168 ->           "code": "uaqi",
+16:56:42.168 ->           "displayName": "Universal AQI",
+16:56:42.168 ->           "aqi": 69,
+16:56:42.168 ->           "aqiDisplay": "69",
+16:56:42.168 ->           "color": {
+16:56:42.168 ->             "red": 0.5411765,
+16:56:42.200 ->             "green": 0.81960785,
+16:56:42.200 ->             "blue": 0.1882353
+16:56:42.200 ->           },
+16:56:42.200 ->           "category": "Good air quality",
+16:56:42.200 ->           "dominantPollutant": "pm25"
+16:56:42.200 ->         }
+16:56:42.200 ->       ]
+16:56:42.200 ->     },
+00:56:45.327 ->     {
+00:56:45.327 ->       "dateTime": "2026-01-04T18:00:00Z",
+00:56:45.327 ->       "indexes": [
+00:56:45.327 ->         {
+00:56:45.327 ->           "code": "uaqi",
+00:56:45.327 ->           "displayName": "Universal AQI",
+00:56:45.358 ->           "aqi": 58,
+00:56:45.358 ->           "aqiDisplay": "58",
+00:56:45.358 ->           "color": {
+00:56:45.358 ->             "red": 0.8039216,
+00:56:45.358 ->             "green": 0.92156863,
+00:56:45.358 ->             "blue": 0.078431375
+00:56:45.358 ->           },
+00:56:45.358 ->           "category": "Moderate air quality",
+00:56:45.358 ->           "dominantPollutant": "pm25"
+00:56:45.358 ->         }
+00:56:45.358 ->       ]
+00:56:45.358 ->     },
+00:56:45.358 ->     {
+00:56:45.358 ->       "dateTime": "2026-01-04T19:00:00Z",
+00:56:45.358 ->       "indexes": [
+00:56:45.390 ->         {
+00:56:45.390 ->           "code": "uaqi",
+00:56:45.390 ->           "displayName": "Universal AQI",
+00:56:45.390 ->           "aqi": 58,
+00:56:45.390 ->           "aqiDisplay": "58",
+00:56:45.390 ->           "color": {
+00:56:45.390 ->             "red": 0.8039216,
+00:56:45.390 ->             "green": 0.92156863,
+00:56:45.390 ->             "blue": 0.078431375
+00:56:45.390 ->           },
+00:56:45.390 ->           "category": "Moderate air quality",
+00:56:45.390 ->           "dominantPollutant": "pm25"
+00:56:45.390 ->         }
+00:56:45.422 ->       ]
+00:56:45.422 ->     },
+00:56:45.422 ->     {
+00:56:45.422 ->       "dateTime": "2026-01-04T20:00:00Z",
+00:56:45.422 ->       "indexes": [
+00:56:45.422 ->         {
+00:56:45.422 ->           "code": "uaqi",
+00:56:45.422 ->           "displayName": "Universal AQI",
+00:56:45.422 ->           "aqi": 59,
+00:56:45.422 ->           "aqiDisplay": "59",
+00:56:45.422 ->           "color": {
+00:56:45.422 ->             "red": 0.78039217,
+00:56:45.422 ->             "green": 0.9137255,
+00:56:45.422 ->             "blue": 0.08627451
+00:56:45.422 ->           },
+00:56:45.422 ->           "category": "Moderate air quality",
+00:56:45.454 ->           "dominantPollutant": "pm25"
+00:56:45.454 ->         }
+00:56:45.454 ->       ]
+00:56:45.454 ->     },
+00:56:45.454 ->     {
+00:56:45.454 ->       "dateTime": "2026-01-04T21:00:00Z",
+00:56:45.454 ->       "indexes": [
+00:56:45.454 ->         {
+00:56:45.454 ->           "code": "uaqi",
+00:56:45.454 ->           "displayName": "Universal AQI",
+00:56:45.454 ->           "aqi": 61,
+00:56:45.454 ->           "aqiDisplay": "61",
+00:56:45.454 ->           "color": {
+00:56:45.454 ->             "red": 0.73333335,
+00:56:45.454 ->             "green": 0.89411765,
+00:56:45.454 ->             "blue": 0.10980392
+00:56:45.454 ->           },
+00:56:45.486 ->           "category": "Good air quality",
+00:56:45.486 ->           "dominantPollutant": "pm25"
+00:56:45.486 ->         }
+00:56:45.486 ->       ]
+00:56:45.486 ->     },
+00:56:45.486 ->     {
+00:56:45.486 ->       "dateTime": "2026-01-04T22:00:00Z",
+00:56:45.486 ->       "indexes": [
+00:56:45.486 ->         {
+00:56:45.486 ->           "code": "uaqi",
+00:56:45.486 ->           "displayName": "Universal AQI",
+00:56:45.486 ->           "aqi": 63,
+00:56:45.486 ->           "aqiDisplay": "63",
+00:56:45.486 ->           "color": {
+00:56:45.486 ->             "red": 0.6862745,
+00:56:45.518 ->             "green": 0.8745098,
+00:56:45.518 ->             "blue": 0.12941177
+00:56:45.518 ->           },
+00:56:45.518 ->           "category": "Good air quality",
+00:56:45.518 ->           "dominantPollutant": "pm25"
+00:56:45.518 ->         }
+00:56:45.518 ->       ]
+00:56:45.518 ->     },
+00:56:45.518 ->     {
+00:56:45.518 ->       "dateTime": "2026-01-04T23:00:00Z",
+00:56:45.518 ->       "indexes": [
+00:56:45.518 ->         {
+00:56:45.518 ->           "code": "uaqi",
+00:56:45.518 ->           "displayName": "Universal AQI",
+00:56:45.518 ->           "aqi": 65,
+00:56:45.518 ->           "aqiDisplay": "65",
+00:56:45.518 ->           "color": {
+00:56:45.550 ->             "red": 0.63529414,
+00:56:45.550 ->             "green": 0.85882354,
+00:56:45.550 ->             "blue": 0.14901961
+00:56:45.550 ->           },
+00:56:45.550 ->           "category": "Good air quality",
+00:56:45.550 ->           "dominantPollutant": "pm25"
+00:56:45.550 ->         }
+00:56:45.550 ->       ]
+00:56:45.550 ->     },
+00:56:45.550 ->     {
+00:56:45.550 ->       "dateTime": "2026-01-05T00:00:00Z",
+00:56:45.550 ->       "indexes": [
+00:56:45.550 ->         {
+00:56:45.550 ->           "code": "uaqi",
+00:56:45.550 ->           "displayName": "Universal AQI",
+00:56:45.582 ->           "aqi": 63,
+00:56:45.582 ->           "aqiDisplay": "63",
+00:56:45.582 ->           "color": {
+00:56:45.582 ->             "red": 0.6862745,
+00:56:45.582 ->             "green": 0.8745098,
+00:56:45.582 ->             "blue": 0.12941177
+00:56:45.582 ->           },
+00:56:45.582 ->           "category": "Good air quality",
+00:56:45.582 ->           "dominantPollutant": "pm25"
+00:56:45.582 ->         }
+00:56:45.582 ->       ]
+00:56:45.582 ->     }
+00:56:45.582 ->   ],
+00:56:45.582 ->   "regionCode": "th",
+00:56:45.582 ->   "nextPageToken": "Ci4KEgnfDwcmNJgrQBFY4jWRAh5ZQBoQCgYI6u/qygYSBgjatOzKBiABMgJlbjgBEAc="
+00:56:45.615 -> }
+*/
+      JsonArray hourlyForecasts = doc["hourlyForecasts"].as<JsonArray>();
+      for (int i = 0; i < hourlyForecasts.size() && i < 7; i++) {
+        JsonObject forecast = hourlyForecasts[i];
+        JsonArray indexes = forecast["indexes"].as<JsonArray>();
+        const char *date = forecast["dateTime"];  // "YYYY-MM-DDTHH:MM:SSZ"
+        int local_hour = utc_iso8601_to_local_hour(date);
+        String hour_name = hour_of_day((local_hour >= 0) ? local_hour : 0);
+        lv_label_set_text(lbl_air_quality_hourly[i], hour_name.c_str());
+        if (indexes.size() > 0) {
+          JsonObject index0 = indexes[0];
+          int aqi = index0["aqi"].as<int>();
+          String aqiDisplay = index0["aqiDisplay"].as<String>();
+          // const char* category = index0["category"];
+          lv_label_set_text_fmt(lbl_air_quality_hourly_aqi[i], "%s", aqiDisplay.c_str());
+
+          // float red = index0["color"]["red"].as<float>();
+          // float green = index0["color"]["green"].as<float>();
+          // float blue = index0["color"]["blue"].as<float>();
+
+          // if (isnan(red)) {
+          //   red = 0.0;
+          // }
+          // if (isnan(green)) {
+          //   green = 0.0;
+          // }
+          // if (isnan(blue)) {
+          //   blue = 0.0;
+          // }
+          // lv_color_t c = lv_color_make((uint8_t)(red * 255), (uint8_t)(green * 255), (uint8_t)(blue * 255));
+          // lv_obj_set_style_text_color(lbl_air_quality_hourly_aqi[i], c, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+        } else {
+          lv_label_set_text(lbl_air_quality_hourly_aqi[i], "N/A");
+          lv_obj_set_style_text_color(lbl_air_quality_hourly_aqi[i], lv_color_white(), LV_PART_MAIN | LV_STATE_DEFAULT);
+        }
+      }
+
+      air_quality_initialized = true;
+
+    } else {
+      Serial.println("JSON parse failed on result from " + url);
+    }
+  } else {
+    Serial.println("HTTP POST failed at " + url + " with code " + String(code));
+    if (http.connected()) {
+      String payload = http.getString();
+      Serial.println(payload);
+    }
   }
   http.end();
 }
@@ -1489,4 +2062,113 @@ const lv_img_dsc_t* choose_icon(int code, int is_day) {
         ? &icon_mostly_cloudy_day
         : &icon_mostly_cloudy_night;
   }
+}
+// Returns the current local time plus a given number of hours as an RFC3339 string with system timezone offset (e.g., "2026-01-04T18:30:00+07:00")
+String get_iso8601_time_plus_hours(int hours) {
+  struct tm timeinfo;
+  time_t now = time(nullptr) + hours * 3600;
+  localtime_r(&now, &timeinfo);
+  char buf[30];
+  strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S%z", &timeinfo);
+  String rfc3339(buf);
+  // Format timezone from +HHMM to +HH:MM
+  if (rfc3339.length() >= 5) {
+    rfc3339 = rfc3339.substring(0, rfc3339.length() - 2) + ":" + rfc3339.substring(rfc3339.length() - 2);
+  }
+  return rfc3339;
+}
+
+// HTTP helpers with simple retry/backoff logic.
+// On success the provided `http` will remain open (so caller can call `http.getString()`),
+// on final failure the `http` will be closed.
+int httpGetWithRetries(HTTPClient &http, const String &url, int maxAttempts = 3, int backoffMs = 1000) {
+  int code = -1;
+  for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
+    http.begin(url);
+    code = http.GET();
+    // Treat positive codes < 500 as success (client/server error 5xx are retriable)
+    if (code > 0 && code < 500) {
+      // leave http open for caller to read
+      return code;
+    }
+    http.end();
+    if (attempt < maxAttempts) {
+      Serial.printf("HTTP GET failed (attempt %d/%d) code=%d, retrying in %dms\n", attempt, maxAttempts, code, backoffMs);
+      delay(backoffMs);
+    }
+  }
+  // final failure, ensure closed
+  return code;
+}
+
+int httpPostWithRetries(HTTPClient &http, const String &url, const String &payload, int maxAttempts = 3, int backoffMs = 1000) {
+  int code = -1;
+  for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
+    http.begin(url);
+    http.addHeader("Content-Type", "application/json");
+    code = http.POST(payload);
+    if (code > 0 && code < 500) {
+      return code;
+    }
+    http.end();
+    if (attempt < maxAttempts) {
+      Serial.printf("HTTP POST failed (attempt %d/%d) code=%d, retrying in %dms\n", attempt, maxAttempts, code, backoffMs);
+      delay(backoffMs);
+    }
+  }
+  return code;
+}
+
+// Parse an RFC3339/ISO8601 UTC timestamp like "YYYY-MM-DDTHH:MM:SSZ"
+// and return the local hour (0-23) for that instant.
+// Portable replacement for timegm(): convert a UTC `struct tm` to time_t.
+static time_t timegm_compat(struct tm *tm) {
+  char *old_tz = getenv("TZ");
+  char old_tz_buf[64];
+  bool had_old = false;
+  if (old_tz) {
+    strncpy(old_tz_buf, old_tz, sizeof(old_tz_buf) - 1);
+    old_tz_buf[sizeof(old_tz_buf) - 1] = '\0';
+    had_old = true;
+  }
+
+  // Set TZ to UTC and refresh
+  setenv("TZ", "UTC0", 1);
+  tzset();
+
+  time_t t = mktime(tm);
+
+  // Restore previous TZ
+  if (had_old) {
+    setenv("TZ", old_tz_buf, 1);
+  } else {
+    unsetenv("TZ");
+  }
+  tzset();
+
+  return t;
+}
+
+int utc_iso8601_to_local_hour(const char *date) {
+  if (!date) return -1;
+  int year = atoi(date + 0);
+  int mon = atoi(date + 5);
+  int day = atoi(date + 8);
+  int hour = atoi(date + 11);
+  int minute = atoi(date + 14);
+  int second = atoi(date + 17);
+
+  struct tm tm_utc;
+  memset(&tm_utc, 0, sizeof(tm_utc));
+  tm_utc.tm_year = year - 1900;
+  tm_utc.tm_mon = mon - 1;
+  tm_utc.tm_mday = day;
+  tm_utc.tm_hour = hour;
+  tm_utc.tm_min = minute;
+  tm_utc.tm_sec = second;
+
+  time_t t = timegm_compat(&tm_utc);
+  struct tm local_tm;
+  localtime_r(&t, &local_tm);
+  return local_tm.tm_hour;
 }
